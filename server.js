@@ -73,13 +73,13 @@ app.get('/qr', async (_req, res) => {
 
 // ===== Helper: ensure client ready =====
 async function ensureReady(res) {
-  if (isReady) return true;
-  const state = await client.getState().catch(() => null);
-  if (state !== 'CONNECTED') {
-    res.status(503).json({ ok: false, error: 'not_ready', hint: 'Open /qr and scan QR code' });
-    return false;
+  if (!isReady) {
+    return res.status(503).json({
+      ok: false,
+      error: 'not_ready',
+      hint: 'Client not READY yet. Open /qr, scan if needed, وانتظر 10–30 ثانية بعد “WhatsApp ready ✅”.'
+    });
   }
-  isReady = true;
   return true;
 }
 
