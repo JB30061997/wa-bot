@@ -1,4 +1,4 @@
-// server.js — final minimal for Render
+// server.js — ready for Render/VPS
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcodeTerminal = require('qrcode-terminal');
@@ -8,7 +8,14 @@ const app = express();
 app.use(express.json());
 
 // ===== Security: API key header =====
-if (req.path === '/health' || req.path === '/qr') return next();
+const API_KEY = process.env.API_KEY || 'change-me';
+app.use((req, res, next) => {
+  if (req.path === '/health' || req.path === '/qr') return next();
+  if (req.headers['x-api-key'] !== API_KEY) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+  next();
+});
 
 // ===== Health =====
 app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
@@ -18,17 +25,18 @@ let isReady = false;
 let lastQR = null;
 
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }), // mount this as a Disk on Render
+  authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }), // IMPORTANT: mount this as disk in Render
   puppeteer: {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   }
 });
 
+// QR event: string → ASCII + store for HTML
 client.on('qr', (qr) => {
   lastQR = qr;
   console.log('=== Scan this QR with WhatsApp (Linked Devices) ===');
-  qrcodeTerminal.generate(qr, { small: true }); // ASCII in logs
+  qrcodeTerminal.generate(qr, { small: true }); // readable in Logs
 });
 
 client.on('ready', () => {
@@ -45,9 +53,9 @@ client.initialize();
 
 // ===== QR page (image) =====
 app.get('/qr', async (_req, res) => {
-  if (!lastQR) return res.status(404).send('No QR yet. Wait for QR event (check logs) and refresh.');
+  if (!lastQR) return res.status(404).send('No QR yet. Refresh in few seconds.');
   try {
-    const dataUrl = await QRCode.toDataURL(lastQR);
+    const dataUrl = await QRCode.toDataURL(lastQR); // convert to image
     res.type('html').send(`
       <html><body style="display:grid;place-items:center;height:100vh;background:#0b0b0b;color:#eee">
         <div style="text-align:center;font-family:sans-serif">
@@ -58,34 +66,31 @@ app.get('/qr', async (_req, res) => {
       </body></html>
     `);
   } catch (e) {
+    console.error('QR render error:', e);
     res.status(500).send('Failed to render QR');
   }
 });
 
-// ===== Helper: ensure ready =====
+// ===== Helper: ensure client ready =====
 async function ensureReady(res) {
   if (isReady) return true;
   const state = await client.getState().catch(() => null);
   if (state !== 'CONNECTED') {
-    return res.status(503).json({
-      ok: false,
-      error: 'not_ready',
-      hint: 'Open /qr and scan the WhatsApp QR code, then retry.'
-    });
+    res.status(503).json({ ok: false, error: 'not_ready', hint: 'Open /qr and scan QR code' });
+    return false;
   }
   isReady = true;
   return true;
 }
 
 // ===== API: list groups =====
-app.get('/groups', async (req, res) => {
+app.get('/groups', async (_req, res) => {
   if (!(await ensureReady(res))) return;
   try {
     const chats = await client.getChats();
     const groups = chats.filter(c => c.isGroup).map(g => g.name);
     res.json({ ok: true, groups });
   } catch (e) {
-    console.error('GET /groups error:', e);
     res.status(500).json({ ok: false, error: e.message || 'internal_error' });
   }
 });
@@ -93,8 +98,11 @@ app.get('/groups', async (req, res) => {
 // ===== API: send to group =====
 app.post('/send', async (req, res) => {
   if (!(await ensureReady(res))) return;
+
   const { group, text } = req.body || {};
-  if (!group || !text) return res.status(400).json({ ok: false, error: 'group & text required' });
+  if (!group || !text) {
+    return res.status(400).json({ ok: false, error: 'group & text required' });
+  }
 
   try {
     const chats = await client.getChats();
@@ -104,7 +112,6 @@ app.post('/send', async (req, res) => {
     await client.sendMessage(grp.id._serialized, text);
     res.json({ ok: true, message: 'sent' });
   } catch (e) {
-    console.error('POST /send error:', e);
     res.status(500).json({ ok: false, error: e.message || 'internal_error' });
   }
 });
