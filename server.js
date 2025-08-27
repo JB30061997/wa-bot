@@ -83,7 +83,6 @@ async function ensureReady(res) {
   return true;
 }
 
-// ===== API: list groups =====
 app.get('/groups', async (_req, res) => {
   if (!(await ensureReady(res))) return;
   try {
@@ -91,28 +90,29 @@ app.get('/groups', async (_req, res) => {
     const groups = chats.filter(c => c.isGroup).map(g => g.name);
     res.json({ ok: true, groups });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message || 'internal_error' });
+    console.error('GET /groups transient error:', e);
+    return res.status(503).json({
+      ok: false, error: 'not_ready', hint: 'WhatsApp is still loading chats; retry in a few seconds.'
+    });
   }
 });
 
-// ===== API: send to group =====
 app.post('/send', async (req, res) => {
   if (!(await ensureReady(res))) return;
-
   const { group, text } = req.body || {};
-  if (!group || !text) {
-    return res.status(400).json({ ok: false, error: 'group & text required' });
-  }
+  if (!group || !text) return res.status(400).json({ ok: false, error: 'group & text required' });
 
   try {
     const chats = await client.getChats();
     const grp = chats.find(c => c.isGroup && c.name.toLowerCase() === group.toLowerCase());
     if (!grp) return res.status(404).json({ ok: false, error: `Group "${group}" not found` });
-
     await client.sendMessage(grp.id._serialized, text);
     res.json({ ok: true, message: 'sent' });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message || 'internal_error' });
+    console.error('POST /send transient error:', e);
+    return res.status(503).json({
+      ok: false, error: 'not_ready', hint: 'WhatsApp is still loading chats; retry in a few seconds.'
+    });
   }
 });
 
