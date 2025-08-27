@@ -1,71 +1,50 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const express = require('express');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const app = express();
 app.use(express.json());
 
-// خلّي البوت يربط سيشن محلياً باش ماتعاودش تسكانِي كل مرة
+// تحقق من API_KEY
+const API_KEY = process.env.API_KEY || 'default_key';
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+  if (req.headers['x-api-key'] !== API_KEY) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+  next();
+});
+
+// Endpoint صحة
+app.get('/health', (req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
+});
+
 const client = new Client({
-    authStrategy: new LocalAuth(),           // كيسجل السيشن ف .wwebjs_auth
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox', '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', '--disable-gpu'
-        ],
-    },
+  authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
+  puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] }
 });
 
-// QR فالتيرمينال أول مرة
-client.on('qr', (qr) => {
-    console.log('📷 سْكاني هاد QR من تليفون الواتساب ديال البوت:');
-    qrcode.generate(qr, { small: true });
+client.on('qr', qr => console.log('Scan QR:', qr));
+client.on('ready', () => console.log('WhatsApp ready ✅'));
+
+app.get('/groups', async (req, res) => {
+  const chats = await client.getChats();
+  res.json({ groups: chats.filter(c => c.isGroup).map(c => c.name) });
 });
 
-// أحداث مفيدة
-client.on('ready', () => console.log('✅ WhatsApp client جاهز'));
-client.on('authenticated', () => console.log('🔐 Authenticated'));
-client.on('auth_failure', (m) => console.error('❌ Auth failure:', m));
-client.on('disconnected', (r) => console.warn('⚠️ Disconnected:', r));
-
-client.initialize();
-
-// helper: لقَى الجروب بالاسم
-async function findGroupByName(name) {
-    const chats = await client.getChats();
-    return chats.find(c => c.isGroup && c.name.toLowerCase() === name.toLowerCase());
-}
-
-// POST /send  { "group": "Production Alerts", "text": "Hello 👋" }
 app.post('/send', async (req, res) => {
-    try {
-        const { group, text } = req.body;
-        if (!group || !text) {
-            return res.status(400).json({ ok: false, error: 'group and text are required' });
-        }
-        const grp = await findGroupByName(group);
-        if (!grp) return res.status(404).json({ ok: false, error: `Group "${group}" not found` });
+  const { group, text } = req.body;
+  if (!group || !text) return res.status(400).json({ ok: false, error: 'group & text required' });
 
-        await client.sendMessage(grp.id._serialized, text);
-        return res.json({ ok: true });
-    } catch (e) {
-        console.error(e);
-        return res.status(500).json({ ok: false, error: 'internal error' });
-    }
-});
+  const chats = await client.getChats();
+  const grp = chats.find(c => c.isGroup && c.name.toLowerCase() === group.toLowerCase());
+  if (!grp) return res.status(404).json({ ok: false, error: 'Group not found' });
 
-// GET /groups  → باش تشوف أسامي الجروبات
-app.get('/groups', async (_req, res) => {
-    try {
-        const chats = await client.getChats();
-        const groups = chats.filter(c => c.isGroup).map(g => g.name);
-        res.json({ groups });
-    } catch (e) {
-        res.status(500).json({ ok: false });
-    }
+  await client.sendMessage(grp.id._serialized, text);
+  res.json({ ok: true, message: 'sent' });
 });
 
 const PORT = process.env.PORT || 3001;
-// مهم للأمان: فالبروडकشن خليه يسمع غير للـ localhost واستعمل Nginx كـ reverse proxy
-app.listen(PORT, '127.0.0.1', () => console.log('HTTP API on :' + PORT));
+app.listen(PORT, () => console.log('Server listening on', PORT));
+
+client.initialize();
