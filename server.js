@@ -8,13 +8,7 @@ const app = express();
 app.use(express.json());
 
 // ===== Security: API key header =====
-const API_KEY = process.env.API_KEY || 'change-me';
-app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/qr') return next();
-  const key = req.headers['x-api-key'];
-  if (key !== API_KEY) return res.status(401).json({ ok: false, error: 'unauthorized' });
-  next();
-});
+if (req.path === '/health' || req.path === '/qr') return next();
 
 // ===== Health =====
 app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
