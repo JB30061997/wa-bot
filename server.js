@@ -5,8 +5,6 @@ const path = require('path');
 const fs = require('fs/promises');
 const QRCode = require('qrcode');
 const { Client, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
-
-// Optional (for RemoteAuth)
 let mongoose = null, MongoStore = null;
 try {
   mongoose = require('mongoose');
