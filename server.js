@@ -1,131 +1,181 @@
-// server.js — final for Render/VPS
+// server.js — wa-bot (Express + whatsapp-web.js) — Render friendly
+
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcodeTerminal = require('qrcode-terminal');
+const path = require('path');
+const fs = require('fs/promises');
 const QRCode = require('qrcode');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 
 const app = express();
 app.use(express.json());
 
-// ===== Security: API key header =====
-const API_KEY = process.env.API_KEY || 'change-me';
+// ===== Config =====
+const PORT = process.env.PORT || 10000;                         
+const API_KEY = process.env.API_KEY || 'change-me';             
+const DATA_PATH = process.env.WWEBJS_DATA || '/var/data/wwebjs';
+const CACHE_PATH = process.env.WWEBJS_CACHE || '/var/data/wwebjs-cache';
 
-// خليهوم مفتوحين باش تقدر تراقب الخدمة وتسكان QR من المتصفح
+const isOpenPath = (p) =>
+  p === '/' ||
+  p.startsWith('/health') ||
+  p.startsWith('/healthz') ||
+  p.startsWith('/ready') ||
+  p.startsWith('/qr') ||
+  p.startsWith('/debug');
+
+// ===== Security middleware =====
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/qr') return next();
-  const key = req.headers['x-api-key'];
-  if (key !== API_KEY) {
+  if (isOpenPath(req.path || '/')) return next();
+  const key = req.header('x-api-key');
+  if (!key || key !== API_KEY) {
     return res.status(401).json({ ok: false, error: 'Unauthorized' });
   }
   next();
 });
 
-// ===== Health =====
-app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
-
-// ===== WhatsApp Client =====
+// ===== State =====
+let client;                // WhatsApp client
+let lastQr = null;
+let isAuthenticated = false;
 let isReady = false;
-let lastQR = null;
+let lastEvents = [];
+const pushEv = (ev) => {
+  lastEvents.push({ ev, ts: new Date().toISOString() });
+  if (lastEvents.length > 100) lastEvents.shift();
+};
 
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }), // IMPORTANT: mount this path as a Disk on Render
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-  }
+// ===== Routes =====
+app.get('/', (_req, res) => res.json({ ok: true, service: 'wa-bot' }));
+app.get('/health', (_req, res) => res.status(200).json({ ok: true, uptime: process.uptime() }));
+app.get('/healthz', (_req, res) => res.status(200).json({ ok: true, uptime: process.uptime() }));
+
+app.get('/ready', (_req, res) => {
+  if (isReady) return res.json({ ok: true });
+  return res.status(503).json({
+    ok: false,
+    error: 'not_ready',
+    hint: 'Open /qr, scan the WhatsApp QR code, then wait for chats to finish loading.'
+  });
 });
 
-client.on('qr', (qr) => {
-  lastQR = qr;
-  console.log('=== Scan this QR with WhatsApp (Linked Devices) ===');
-  qrcodeTerminal.generate(qr, { small: true }); // ASCII QR in logs
-});
-
-client.on('ready', () => {
-  isReady = true;
-  console.log('WhatsApp ready ✅');
-});
-
-client.on('disconnected', (reason) => {
-  isReady = false;
-  console.warn('WhatsApp disconnected:', reason);
-});
-
-client.initialize();
-
-// ===== QR page (image) =====
 app.get('/qr', async (_req, res) => {
-  if (!lastQR) return res.status(404).send('No QR yet. Wait a few seconds and refresh.');
   try {
-    const dataUrl = await QRCode.toDataURL(lastQR);
-    res.type('html').send(`
-      <html><body style="display:grid;place-items:center;height:100vh;background:#0b0b0b;color:#eee">
-        <div style="text-align:center;font-family:sans-serif">
-          <h2>Scan with WhatsApp → Linked Devices</h2>
-          <img src="${dataUrl}" width="320" height="320" />
-          <p>If it expires, refresh this page.</p>
-        </div>
-      </body></html>
-    `);
+    if (isReady || isAuthenticated) {
+      return res.send(`<html><body style="font-family:sans-serif">
+        <h2>Already authenticated ✅</h2><p>You can close this page.</p>
+      </body></html>`);
+    }
+    if (!lastQr) {
+      return res.send(`<html><body style="font-family:sans-serif">
+        <h2>QR not generated yet…</h2><p>Keep this page open and refresh in a few seconds.</p>
+      </body></html>`);
+    }
+    const dataUrl = await QRCode.toDataURL(lastQr);
+    res.send(`<html><body style="font-family:sans-serif;text-align:center">
+      <h2>Scan this QR with WhatsApp</h2>
+      <img src="${dataUrl}" alt="QR" style="width:320px;height:320px"/>
+      <p>If it expires, refresh the page.</p>
+    </body></html>`);
   } catch (e) {
-    console.error('QR render error:', e);
-    res.status(500).send('Failed to render QR');
+    console.error('QR error:', e);
+    res.status(500).send('QR error');
   }
 });
 
-// ===== Helper: ensure client is ready =====
-async function ensureReady(res) {
-  if (isReady) return true;
-  const state = await client.getState().catch(() => null);
-  if (state !== 'CONNECTED') {
-    res.status(503).json({
-      ok: false,
-      error: 'not_ready',
-      hint: 'Open /qr and scan the WhatsApp QR code, then retry.'
-    });
-    return false;
+app.get('/debug', (_req, res) => {
+  res.json({ ok: true, isAuthenticated, isReady, events: lastEvents.slice(-20) });
+});
+
+const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get('/me', asyncHandler(async (_req, res) => {
+  if (!isReady) return res.status(503).json({ ok: false, error: 'not_ready' });
+  const info = client.info || null;
+  res.json({
+    ok: true,
+    me: info ? { pushname: info.pushname, wid: info.wid?._serialized ?? null, platform: info.platform } : null
+  });
+}));
+
+app.get('/groups', asyncHandler(async (_req, res) => {
+  if (!isReady) {
+    return res.status(503).json({ ok: false, error: 'not_ready', hint: 'Scan /qr then retry.' });
   }
-  isReady = true;
-  return true;
+  const chats = await client.getChats();
+  const groups = chats.filter(c => c.isGroup).map(g => ({
+    id: g.id?._serialized,
+    name: g.name,
+    participantsCount: g.participants?.length ?? null
+  }));
+  res.json({ ok: true, count: groups.length, groups });
+}));
+
+// { "to": "2126xxxxxxx@c.us" | "xxxxxx@g.us", "message": "Hi" }
+app.post('/send', asyncHandler(async (req, res) => {
+  if (!isReady) return res.status(503).json({ ok: false, error: 'not_ready' });
+  const { to, message } = req.body || {};
+  if (!to || !message) return res.status(400).json({ ok: false, error: 'to_and_message_required' });
+  await client.sendMessage(to, message);
+  res.json({ ok: true });
+}));
+
+app.use((err, _req, res, _next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ ok: false, error: 'server_error', detail: String(err.message || err) });
+});
+
+// ===== WhatsApp init =====
+async function initWhatsApp() {
+  await fs.mkdir(DATA_PATH, { recursive: true });
+  await fs.mkdir(CACHE_PATH, { recursive: true });
+
+  // Strategy
+  const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
+
+  // Client
+  client = new Client({
+    authStrategy,
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 0,
+    restartOnAuthFail: true,
+    qrMaxRetries: 6,
+    puppeteer: {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--single-process',
+        '--no-zygote',
+        '--js-flags=--max-old-space-size=256'
+      ]
+    },
+    webVersionCache: { type: 'local', path: CACHE_PATH }
+  });
+
+  // Events
+  client.on('qr', (qr) => { lastQr = qr; isAuthenticated = false; isReady = false; pushEv('qr'); console.log('[QR] new QR generated'); });
+  client.on('authenticated', () => { isAuthenticated = true; pushEv('authenticated'); console.log('Authenticated 🔐'); });
+  client.on('ready', () => { isReady = true; pushEv('ready'); console.log('WhatsApp ready ✅'); });
+  client.on('loading_screen', (p, msg) => console.log('Loading…', p, msg));
+  client.on('change_state', (s) => console.log('[State]', s));
+  client.on('disconnected', (reason) => { isReady = false; pushEv(`disconnected:${reason}`); console.warn('[Disconnected]', reason); });
+
+  await client.initialize();
 }
 
-// ===== API: list groups =====
-app.get('/groups', async (_req, res) => {
-  if (!(await ensureReady(res))) return;
-  try {
-    const chats = await client.getChats();
-    const groups = chats.filter(c => c.isGroup).map(g => g.name);
-    res.json({ ok: true, groups });
-  } catch (e) {
-    console.error('GET /groups error:', e);
-    res.status(500).json({ ok: false, error: e.message || 'internal_error' });
-  }
+// ===== Start server then init WA =====
+app.listen(PORT, () => {
+  console.log(`Server listening on ${PORT}`);
+  console.log(`[Auth] Using LocalAuth at ${DATA_PATH}`);
 });
 
-// ===== API: send to group =====
-app.post('/send', async (req, res) => {
-  if (!(await ensureReady(res))) return;
-
-  const { group, text } = req.body || {};
-  if (!group || !text) {
-    return res.status(400).json({ ok: false, error: 'group & text required' });
-  }
-
-  try {
-    const chats = await client.getChats();
-    const grp = chats.find(c => c.isGroup && c.name.toLowerCase() === group.toLowerCase());
-    if (!grp) return res.status(404).json({ ok: false, error: `Group "${group}" not found` });
-
-    await client.sendMessage(grp.id._serialized, text);
-    res.json({ ok: true, message: 'sent' });
-  } catch (e) {
-    console.error('POST /send error:', e);
-    res.status(500).json({ ok: false, error: e.message || 'internal_error' });
-  }
+initWhatsApp().catch((e) => {
+  console.error('Client init error:', e);
+  process.exit(1);
 });
 
-// (اختياري) روت رئيسي بسيط
-app.get('/', (_req, res) => res.json({ ok: true, service: 'wa-bot' }));
-
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log('Server listening on', PORT));
+// ===== Process guards =====
+process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
+process.on('uncaughtException', (e) => console.error('uncaughtException', e));
