@@ -1,19 +1,30 @@
-// server.js — wa-bot (Express + whatsapp-web.js) — Render friendly
+// server.js — wa-bot (Express + whatsapp-web.js) — Render + RemoteAuth-ready
 
 const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 const QRCode = require('qrcode');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, RemoteAuth } = require('whatsapp-web.js');
+
+// Optional (for RemoteAuth)
+let mongoose = null, MongoStore = null;
+try {
+  mongoose = require('mongoose');
+  ({ MongoStore } = require('wwebjs-mongo'));
+} catch (_) {
+  // OK if not installed; we'll fallback to LocalAuth
+}
 
 const app = express();
 app.use(express.json());
 
 // ===== Config =====
-const PORT = process.env.PORT || 10000;                         
-const API_KEY = process.env.API_KEY || 'change-me';             
+const PORT = process.env.PORT || 10000;
+const API_KEY = process.env.API_KEY || 'change-me';
 const DATA_PATH = process.env.WWEBJS_DATA || '/var/data/wwebjs';
 const CACHE_PATH = process.env.WWEBJS_CACHE || '/var/data/wwebjs-cache';
+const MONGO_URI = process.env.MONGO_URI || null;
+const MONGO_DB = process.env.MONGO_DB || 'wa-bot';
 
 const isOpenPath = (p) =>
   p === '/' ||
@@ -34,7 +45,7 @@ app.use((req, res, next) => {
 });
 
 // ===== State =====
-let client;                // WhatsApp client
+let client;
 let lastQr = null;
 let isAuthenticated = false;
 let isReady = false;
@@ -129,10 +140,23 @@ async function initWhatsApp() {
   await fs.mkdir(DATA_PATH, { recursive: true });
   await fs.mkdir(CACHE_PATH, { recursive: true });
 
-  // Strategy
-  const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
+  // اختر RemoteAuth إذا كان MONGO_URI موجود والباقي متثبت
+  const useRemote = !!(MONGO_URI && mongoose && MongoStore);
+  let authStrategy;
 
-  // Client
+  if (useRemote) {
+    await mongoose.connect(MONGO_URI, { dbName: MONGO_DB });
+    const store = new MongoStore({ mongoose });
+    authStrategy = new RemoteAuth({
+      store,
+      backupSyncIntervalMs: 300000, // 5min
+    });
+    console.log('[Auth] Using RemoteAuth (Mongo).');
+  } else {
+    authStrategy = new LocalAuth({ dataPath: DATA_PATH });
+    console.log('[Auth] Using LocalAuth at', DATA_PATH);
+  }
+
   client = new Client({
     authStrategy,
     takeoverOnConflict: true,
@@ -168,7 +192,6 @@ async function initWhatsApp() {
 // ===== Start server then init WA =====
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
-  console.log(`[Auth] Using LocalAuth at ${DATA_PATH}`);
 });
 
 initWhatsApp().catch((e) => {
