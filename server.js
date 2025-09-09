@@ -1,19 +1,14 @@
-// server.js — WhatsApp Bot (Express + whatsapp-web.js) — Local & Render friendly
-
 const express = require('express');
 const fs = require('fs/promises');
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const puppeteer = require('puppeteer'); // باش نجيبو المسار ديال Chromium
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json());
-
-// ===== Config =====
 const PORT       = process.env.PORT || 10000; 
 const API_KEY    = process.env.API_KEY || 'change-me';
 
-// Paths: محلي ./data, أما على Render /var/data
 const isRender   = !!process.env.RENDER; 
 const DATA_PATH  = process.env.WWEBJS_DATA  || (isRender ? '/var/data/wwebjs' : './data/wwebjs');
 const CACHE_PATH = process.env.WWEBJS_CACHE || (isRender ? '/var/data/wwebjs-cache' : './data/wwebjs-cache');
@@ -31,7 +26,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== State =====
 let client;
 let lastQr = null;
 let isAuthenticated = false;
@@ -42,7 +36,6 @@ const pushEv = (ev) => {
   if (lastEvents.length > 100) lastEvents.shift();
 };
 
-// ===== Open routes =====
 app.get('/', (_req, res) => res.json({ ok:true, service:'wa-bot' }));
 app.get('/health', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
 app.get('/healthz', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
@@ -83,10 +76,7 @@ app.get('/debug', (_req, res) => {
   res.json({ ok:true, isAuthenticated, isReady, events:lastEvents.slice(-20) });
 });
 
-// ===== Helpers =====
 const asyncHandler = (fn) => (req,res,next)=> Promise.resolve(fn(req,res,next)).catch(next);
-
-// ===== Protected APIs =====
 app.get('/me', asyncHandler(async (_req, res) => {
   if (!isReady) return res.status(503).json({ ok:false, error:'not_ready' });
   const info = client.info || null;
@@ -113,21 +103,18 @@ app.post('/send', asyncHandler(async (req, res) => {
   res.json({ ok:true });
 }));
 
-// ===== Init WhatsApp =====
 async function initWhatsApp() {
   await fs.mkdir(DATA_PATH,  { recursive:true });
   await fs.mkdir(CACHE_PATH, { recursive:true });
 
   const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
 
-  // Puppeteer options
   let puppeteerOpts = {
     headless: true,
     protocolTimeout: 120000,
   };
 
   if (isRender) {
-    // Render server
     puppeteerOpts.args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -137,7 +124,6 @@ async function initWhatsApp() {
       '--disable-gpu'
     ];
   } else {
-    // Local macOS/dev
     puppeteerOpts.executablePath = puppeteer.executablePath();
     puppeteerOpts.args = [
       '--disable-dev-shm-usage',
@@ -176,8 +162,6 @@ async function initWhatsApp() {
     } catch {}
   }, 15000);
 }
-
-// ===== Start HTTP then init WA =====
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
   console.log(`[Auth] Using LocalAuth at ${DATA_PATH}`);
@@ -187,7 +171,5 @@ initWhatsApp().catch((e) => {
   console.error('Client init error:', e);
   process.exit(1);
 });
-
-// ===== Guards =====
 process.on('unhandledRejection', (r)=>console.error('unhandledRejection', r));
 process.on('uncaughtException', (e)=>console.error('uncaughtException', e));
