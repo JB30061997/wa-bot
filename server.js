@@ -173,3 +173,38 @@ initWhatsApp().catch((e) => {
 });
 process.on('unhandledRejection', (r)=>console.error('unhandledRejection', r));
 process.on('uncaughtException', (e)=>console.error('uncaughtException', e));
+
+let initializing = false;
+
+async function safeInit() {
+  if (initializing) return;
+  initializing = true;
+  try {
+    await initWhatsApp();
+  } finally {
+    initializing = false;
+  }
+}
+
+async function resetClient(reason) {
+  try {
+    isReady = false;
+    isAuthenticated = false;
+    lastQr = null;
+    pushEv(`reset:${reason}`);
+
+    if (client) {
+      try { await client.destroy(); } catch {}
+      client = null;
+    }
+  } catch {}
+  // small backoff
+  setTimeout(() => safeInit().catch(console.error), 5000);
+}
+
+// بدل initWhatsApp() بـ safeInit()
+safeInit().catch((e) => {
+  console.error('Client init error:', e);
+  process.exit(1);
+});
+
