@@ -8,7 +8,7 @@ const app = express();
 app.use(express.json());
 
 const PORT       = process.env.PORT || 10000; 
-const API_KEY    = process.env.API_KEY || 'change-me';
+const API_KEY    = process.env.API_KEY || '30061997';
 
 const isRender   = !!process.env.RENDER; 
 const DATA_PATH  = process.env.WWEBJS_DATA  || (isRender ? '/var/data/wwebjs' : './data/wwebjs');
