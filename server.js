@@ -161,7 +161,24 @@ async function initWhatsApp() {
   client.on('ready', () => { isReady = true; pushEv('ready'); console.log('WhatsApp ready ✅'); });
   client.on('loading_screen', (p, msg) => console.log('Loading…', p, msg));
   client.on('change_state', (s) => console.log('[State]', s));
-  client.on('disconnected', (reason) => { isReady = false; pushEv(`disconnected:${reason}`); console.warn('[Disconnected]', reason); });
+  client.on('disconnected', async (reason) => {
+  isReady = false;
+  isAuthenticated = false;
+  pushEv(`disconnected:${reason}`);
+  console.warn('[Disconnected]', reason);
+
+  // ila logout, حاول ترجع الخدمة بلا ما يطيح السيرفر
+  if (String(reason).toUpperCase().includes('LOGOUT')) {
+    try { await client.destroy(); } catch {}
+    lastQr = null;
+
+    // عاود init بعد شوية
+    setTimeout(() => {
+      initWhatsApp().catch(e => console.error('Re-init error:', e));
+    }, 5000);
+  }
+});
+
 
   await client.initialize();
 
