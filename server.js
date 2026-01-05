@@ -171,5 +171,8 @@ initWhatsApp().catch((e) => {
   console.error('Client init error:', e);
   process.exit(1);
 });
-process.on('unhandledRejection', (r)=>console.error('unhandledRejection', r));
+process.on('unhandledRejection', (r) => {
+  console.error('unhandledRejection', r);
+  process.exit(1);
+});
 process.on('uncaughtException', (e)=>console.error('uncaughtException', e));
