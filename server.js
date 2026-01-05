@@ -6,7 +6,6 @@ const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json());
-
 const PORT       = process.env.PORT || 10000; 
 const API_KEY    = process.env.API_KEY || 'change-me';
 
@@ -27,7 +26,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== State =====
 let client;
 let lastQr = null;
 let isAuthenticated = false;
@@ -38,7 +36,6 @@ const pushEv = (ev) => {
   if (lastEvents.length > 100) lastEvents.shift();
 };
 
-// ===== Open routes =====
 app.get('/', (_req, res) => res.json({ ok:true, service:'wa-bot' }));
 app.get('/health', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
 app.get('/healthz', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
@@ -79,10 +76,7 @@ app.get('/debug', (_req, res) => {
   res.json({ ok:true, isAuthenticated, isReady, events:lastEvents.slice(-20) });
 });
 
-// ===== Helpers =====
 const asyncHandler = (fn) => (req,res,next)=> Promise.resolve(fn(req,res,next)).catch(next);
-
-// ===== Protected APIs =====
 app.get('/me', asyncHandler(async (_req, res) => {
   if (!isReady) return res.status(503).json({ ok:false, error:'not_ready' });
   const info = client.info || null;
@@ -109,21 +103,18 @@ app.post('/send', asyncHandler(async (req, res) => {
   res.json({ ok:true });
 }));
 
-// ===== Init WhatsApp =====
 async function initWhatsApp() {
   await fs.mkdir(DATA_PATH,  { recursive:true });
   await fs.mkdir(CACHE_PATH, { recursive:true });
 
   const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
 
-  // Puppeteer options
   let puppeteerOpts = {
     headless: true,
     protocolTimeout: 120000,
   };
 
   if (isRender) {
-    // Render server
     puppeteerOpts.args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -133,7 +124,6 @@ async function initWhatsApp() {
       '--disable-gpu'
     ];
   } else {
-    // Local macOS/dev
     puppeteerOpts.executablePath = puppeteer.executablePath();
     puppeteerOpts.args = [
       '--disable-dev-shm-usage',
@@ -161,24 +151,7 @@ async function initWhatsApp() {
   client.on('ready', () => { isReady = true; pushEv('ready'); console.log('WhatsApp ready ✅'); });
   client.on('loading_screen', (p, msg) => console.log('Loading…', p, msg));
   client.on('change_state', (s) => console.log('[State]', s));
-  client.on('disconnected', async (reason) => {
-  isReady = false;
-  isAuthenticated = false;
-  pushEv(`disconnected:${reason}`);
-  console.warn('[Disconnected]', reason);
-
-  // ila logout, حاول ترجع الخدمة بلا ما يطيح السيرفر
-  if (String(reason).toUpperCase().includes('LOGOUT')) {
-    try { await client.destroy(); } catch {}
-    lastQr = null;
-
-    // عاود init بعد شوية
-    setTimeout(() => {
-      initWhatsApp().catch(e => console.error('Re-init error:', e));
-    }, 5000);
-  }
-});
-
+  client.on('disconnected', (reason) => { isReady = false; pushEv(`disconnected:${reason}`); console.warn('[Disconnected]', reason); });
 
   await client.initialize();
 
@@ -189,8 +162,6 @@ async function initWhatsApp() {
     } catch {}
   }, 15000);
 }
-
-// ===== Start HTTP then init WA =====
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
   console.log(`[Auth] Using LocalAuth at ${DATA_PATH}`);
@@ -200,7 +171,5 @@ initWhatsApp().catch((e) => {
   console.error('Client init error:', e);
   process.exit(1);
 });
-
-// ===== Guards =====
 process.on('unhandledRejection', (r)=>console.error('unhandledRejection', r));
 process.on('uncaughtException', (e)=>console.error('uncaughtException', e));
