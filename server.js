@@ -160,7 +160,7 @@ async function initWhatsApp() {
       const s = client ? await client.getState() : null; 
       console.log('[Heartbeat]', s, 'ready=', isReady);
     } catch {}
-  }, 15000);
+  }, 60000);
 }
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
