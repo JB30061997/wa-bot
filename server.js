@@ -1,15 +1,19 @@
 const express = require('express');
 const fs = require('fs/promises');
+const fsSync = require('fs');
+const path = require('path');
+
 const QRCode = require('qrcode');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json());
-const PORT       = process.env.PORT || 10000; 
-const API_KEY    = process.env.API_KEY || 'change-me';
 
-const isRender   = !!process.env.RENDER; 
+const PORT    = process.env.PORT || 10000;
+const API_KEY = process.env.API_KEY || 'change-me';
+
+const isRender   = !!process.env.RENDER;
 const DATA_PATH  = process.env.WWEBJS_DATA  || (isRender ? '/var/data/wwebjs' : './data/wwebjs');
 const CACHE_PATH = process.env.WWEBJS_CACHE || (isRender ? '/var/data/wwebjs-cache' : './data/wwebjs-cache');
 
@@ -26,16 +30,18 @@ app.use((req, res, next) => {
   next();
 });
 
-let client;
+let client = null;
 let lastQr = null;
 let isAuthenticated = false;
 let isReady = false;
+
 const lastEvents = [];
 const pushEv = (ev) => {
   lastEvents.push({ ev, ts: new Date().toISOString() });
   if (lastEvents.length > 100) lastEvents.shift();
 };
 
+// ===== HTTP =====
 app.get('/', (_req, res) => res.json({ ok:true, service:'wa-bot' }));
 app.get('/health', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
 app.get('/healthz', (_req, res) => res.status(200).json({ ok:true, uptime:process.uptime() }));
@@ -77,9 +83,10 @@ app.get('/debug', (_req, res) => {
 });
 
 const asyncHandler = (fn) => (req,res,next)=> Promise.resolve(fn(req,res,next)).catch(next);
+
 app.get('/me', asyncHandler(async (_req, res) => {
   if (!isReady) return res.status(503).json({ ok:false, error:'not_ready' });
-  const info = client.info || null;
+  const info = client?.info || null;
   res.json({
     ok:true,
     me: info ? { pushname: info.pushname, wid: info.wid?._serialized ?? null, platform: info.platform } : null
@@ -89,8 +96,10 @@ app.get('/me', asyncHandler(async (_req, res) => {
 app.get('/groups', asyncHandler(async (_req, res) => {
   if (!isReady) return res.status(503).json({ ok:false, error:'not_ready', hint:'Scan /qr then retry.' });
   const chats = await client.getChats();
-  const groups = chats.filter(c=>c.isGroup).map(g=>({
-    id: g.id?._serialized, name: g.name, participantsCount: g.participants?.length ?? null
+  const groups = chats.filter(c => c.isGroup).map(g => ({
+    id: g.id?._serialized,
+    name: g.name,
+    participantsCount: g.participants?.length ?? null
   }));
   res.json({ ok:true, count: groups.length, groups });
 }));
@@ -103,76 +112,167 @@ app.post('/send', asyncHandler(async (req, res) => {
   res.json({ ok:true });
 }));
 
-async function initWhatsApp() {
-  await fs.mkdir(DATA_PATH,  { recursive:true });
-  await fs.mkdir(CACHE_PATH, { recursive:true });
+// ===== Restart helpers =====
+let initializing = false;
+let restarting = false;
 
-  const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
-
-  let puppeteerOpts = {
-    headless: true,
-    protocolTimeout: 120000,
-  };
-
-  if (isRender) {
-    puppeteerOpts.args = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-extensions',
-      '--no-zygote',
-      '--disable-gpu'
-    ];
-  } else {
-    puppeteerOpts.executablePath = puppeteer.executablePath();
-    puppeteerOpts.args = [
-      '--disable-dev-shm-usage',
-      '--disable-extensions',
-      '--no-zygote',
-      '--disable-gpu'
-    ];
-  }
-
-  client = new Client({
-    authStrategy,
-    takeoverOnConflict: true,
-    takeoverTimeoutMs: 0,
-    restartOnAuthFail: true,
-    qrMaxRetries: 6,
-    puppeteer: puppeteerOpts,
-    webVersionCache: {
-      type: 'remote',
-      remotePath: 'https://raw.githubusercontent.com/pedroslopez/whatsapp-web.js/main/webCache.json'
-    }
-  });
-
-  client.on('qr', (qr) => { lastQr = qr; isAuthenticated = false; isReady = false; pushEv('qr'); console.log('[QR] new QR generated'); });
-  client.on('authenticated', () => { isAuthenticated = true; pushEv('authenticated'); console.log('Authenticated 🔐'); });
-  client.on('ready', () => { isReady = true; pushEv('ready'); console.log('WhatsApp ready ✅'); });
-  client.on('loading_screen', (p, msg) => console.log('Loading…', p, msg));
-  client.on('change_state', (s) => console.log('[State]', s));
-  client.on('disconnected', (reason) => { isReady = false; pushEv(`disconnected:${reason}`); console.warn('[Disconnected]', reason); });
-
-  await client.initialize();
-
-  setInterval(async () => {
-    try {
-      const s = client ? await client.getState() : null; 
-      console.log('[Heartbeat]', s, 'ready=', isReady);
-    } catch {}
-  }, 60000);
+async function safeDestroy() {
+  try { if (client) await client.destroy(); } catch {}
+  client = null;
+  isReady = false;
+  isAuthenticated = false;
 }
+
+function wipeAuthData() {
+  // LocalAuth كيخزن هنا عادة: DATA_PATH/.wwebjs_auth
+  const authDir = path.join(DATA_PATH, '.wwebjs_auth');
+  try { fsSync.rmSync(authDir, { recursive: true, force: true }); } catch {}
+}
+
+async function restartClean({ wipe = false, delayMs = 10000 } = {}) {
+  if (restarting) return;
+  restarting = true;
+
+  try {
+    await safeDestroy();
+    lastQr = null;
+    if (wipe) wipeAuthData();
+  } finally {
+    setTimeout(() => {
+      restarting = false;
+      initWhatsApp().catch(() => {});
+    }, delayMs);
+  }
+}
+
+// ===== WhatsApp init =====
+async function initWhatsApp() {
+  if (initializing || restarting) return;
+  initializing = true;
+
+  try {
+    await fs.mkdir(DATA_PATH,  { recursive:true });
+    await fs.mkdir(CACHE_PATH, { recursive:true });
+
+    const authStrategy = new LocalAuth({ dataPath: DATA_PATH });
+
+    let puppeteerOpts = {
+      headless: true,
+      protocolTimeout: 120000,
+    };
+
+    if (isRender) {
+      puppeteerOpts.args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--no-zygote',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+      ];
+    } else {
+      puppeteerOpts.executablePath = puppeteer.executablePath();
+      puppeteerOpts.args = [
+        '--disable-dev-shm-usage',
+        '--disable-extensions',
+        '--no-zygote',
+        '--disable-gpu'
+      ];
+    }
+
+    client = new Client({
+      authStrategy,
+      takeoverOnConflict: true,
+      takeoverTimeoutMs: 0,
+      restartOnAuthFail: true,
+      qrMaxRetries: 6,
+      puppeteer: puppeteerOpts,
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/pedroslopez/whatsapp-web.js/main/webCache.json'
+      }
+    });
+
+    client.on('qr', (qr) => {
+      lastQr = qr;
+      isAuthenticated = false;
+      isReady = false;
+      pushEv('qr');
+      console.log('[QR] new QR generated');
+    });
+
+    client.on('authenticated', () => {
+      isAuthenticated = true;
+      pushEv('authenticated');
+      console.log('Authenticated 🔐');
+    });
+
+    client.on('ready', () => {
+      isReady = true;
+      pushEv('ready');
+      console.log('WhatsApp ready ✅');
+    });
+
+    client.on('loading_screen', (p, msg) => console.log('Loading…', p, msg));
+    client.on('change_state', (s) => console.log('[State]', s));
+
+    client.on('disconnected', async (reason) => {
+      isReady = false;
+      pushEv(`disconnected:${reason}`);
+      console.warn('[Disconnected]', reason);
+
+      const r = String(reason || '').toUpperCase();
+
+      // LOGOUT: wipe auth ثم restart clean
+      if (r.includes('LOGOUT')) {
+        await restartClean({ wipe: true, delayMs: 12000 });
+        return;
+      }
+
+      // باقي الحالات: restart clean بلا wipe
+      await restartClean({ wipe: false, delayMs: 10000 });
+    });
+
+    await client.initialize();
+
+    // heartbeat خفيف
+    setInterval(async () => {
+      try {
+        const s = client ? await client.getState() : null;
+        console.log('[Heartbeat]', s, 'ready=', isReady);
+      } catch {}
+    }, 60000);
+
+  } catch (e) {
+    console.error('Client init error:', e);
+    // retry بدل ما نبقاو موقوفين
+    await restartClean({ wipe: false, delayMs: 15000 });
+  } finally {
+    initializing = false;
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
   console.log(`[Auth] Using LocalAuth at ${DATA_PATH}`);
 });
 
 initWhatsApp().catch((e) => {
-  console.error('Client init error:', e);
+  console.error('Client init error (boot):', e);
   process.exit(1);
 });
+
+// مهم: فـRender الأحسن أي crash يدير restart clean
 process.on('unhandledRejection', (r) => {
   console.error('unhandledRejection', r);
   process.exit(1);
 });
-process.on('uncaughtException', (e)=>console.error('uncaughtException', e));
+process.on('uncaughtException', (e) => {
+  console.error('uncaughtException', e);
+  process.exit(1);
+});
